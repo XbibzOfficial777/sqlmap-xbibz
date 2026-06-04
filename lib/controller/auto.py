@@ -22,6 +22,7 @@ import time
 import json
 
 from lib.core.common import dataToStdout
+from lib.core.common import getSafeExString
 from lib.core.common import readInput
 from lib.core.data import conf
 from lib.core.data import kb
@@ -595,9 +596,13 @@ def _classifyParamPriority(paramName):
     for priority, params in SQLI_PRIORITY_PARAMS.items():
         if param_lower in params:
             return priority
-        # Partial match (param name contains priority keyword)
-        for p in params:
-            if p in param_lower:
+
+    # Partial match (param name contains priority keyword)
+    # Only match keywords >= 4 chars to avoid false matches
+    # (e.g., "dir" matching "redirect", "sql" matching "session")
+    for priority in ("high", "medium"):
+        for p in SQLI_PRIORITY_PARAMS[priority]:
+            if len(p) >= 4 and p in param_lower:
                 return priority
 
     return "low"
@@ -641,7 +646,7 @@ def _extractDomain(url):
         # Remove www prefix for better results
         if domain.startswith("www."):
             domain = domain[4:]
-        return domain
+        return domain if domain else None
     except Exception:
         return None
 
@@ -775,15 +780,25 @@ def fingerprintWaf(responseHeaders=None, responseBody=None, statusCode=None):
         # Layer 1: Header matching
         for header_pattern in fingerprint.get("headers", []):
             pattern_lower = header_pattern.lower()
-            # Check if pattern exists in header keys or values
-            if pattern_lower in header_str:
-                confidence += 0.5
-                break
-            # Also check individual header keys
-            for key in header_dict:
-                if pattern_lower in key or key in pattern_lower:
+
+            # Check for "key: value" style patterns (e.g., "server: sucuri")
+            if ":" in pattern_lower:
+                # Match against combined header string
+                if pattern_lower in header_str:
                     confidence += 0.5
                     break
+            else:
+                # Match against individual header keys only
+                for key in header_dict:
+                    if key == pattern_lower or pattern_lower in key:
+                        confidence += 0.5
+                        break
+                # Also check header values for short tokens (e.g., "cf-ray")
+                if confidence == 0.0:
+                    for key, val in header_dict.items():
+                        if pattern_lower in val or pattern_lower in ("%s=%s" % (key, val)):
+                            confidence += 0.5
+                            break
 
         # Layer 2: Body pattern matching
         for body_pattern in fingerprint.get("body_patterns", []):
@@ -832,39 +847,45 @@ def probeWaf(url):
             parsed.params, "", ""
         ))
 
-        probe_url = "%s?dalfox_waf_probe=%s" % (base_url, urllib.parse.quote(WAF_PROBE_PAYLOADS[0]))
+        # Try multiple payloads for better detection (DalFox-style)
+        for payload in WAF_PROBE_PAYLOADS[:3]:
+            try:
+                probe_url = "%s?dalfox_waf_probe=%s" % (base_url, urllib.parse.quote(payload))
+                request = urllib.request.Request(probe_url)
+                request.add_header("User-Agent", random.choice(USER_AGENT_POOL))
 
-        request = urllib.request.Request(probe_url)
-        request.add_header("User-Agent", random.choice(USER_AGENT_POOL))
+                try:
+                    response = urllib.request.urlopen(request, timeout=15)
+                    status_code = response.getcode()
+                    headers = response.headers
+                    body = response.read().decode("utf-8", errors="ignore")
+                except urllib.error.HTTPError as e:
+                    status_code = e.code
+                    headers = e.headers
+                    body = e.read().decode("utf-8", errors="ignore") if e.fp else ""
+                except Exception as ex:
+                    continue
 
-        try:
-            response = urllib.request.urlopen(request, timeout=15)
-            status_code = response.getcode()
-            headers = response.headers
-            body = response.read().decode("utf-8", errors="ignore")
-        except urllib.error.HTTPError as e:
-            status_code = e.code
-            headers = e.headers
-            body = e.read().decode("utf-8", errors="ignore") if e.fp else ""
-        except Exception as ex:
-            dataToStdout("\033[01;36m[WAF-PROBE]\033[0m Probe failed: %s\n" % str(ex))
-            return {}
+                # Analyze blocking response
+                is_blocked = status_code in WAF_BLOCK_STATUS_CODES
 
-        # Analyze blocking response
-        is_blocked = status_code in WAF_BLOCK_STATUS_CODES
+                if is_blocked:
+                    dataToStdout("\033[01;36m[WAF-PROBE]\033[0m \033[01;33mBlocking response detected (HTTP %d)\033[0m\n" % status_code)
 
-        if is_blocked:
-            dataToStdout("\033[01;36m[WAF-PROBE]\033[0m \033[01;33mBlocking response detected (HTTP %d)\033[0m\n" % status_code)
+                    # Fingerprint the blocking response
+                    detected = fingerprintWaf(headers, body, status_code)
+                    if detected:
+                        detected_wafs.update(detected)
+            except Exception:
+                continue
 
-            # Fingerprint the blocking response
-            detected_wafs = fingerprintWaf(headers, body, status_code)
-
-            # If no specific WAF identified but blocking detected
-            if not detected_wafs:
-                detected_wafs["Generic WAF"] = 0.50
-                dataToStdout("\033[01;36m[WAF-PROBE]\033[0m \033[01;33mWAF detected but not specifically identified\033[0m\n")
+        # If no WAF detected from probes but blocking was seen
+        if not detected_wafs:
+            detected_wafs["Generic WAF"] = 0.50
+            dataToStdout("\033[01;36m[WAF-PROBE]\033[0m \033[01;33mWAF detected but not specifically identified\033[0m\n")
         else:
-            dataToStdout("\033[01;36m[WAF-PROBE]\033[0m No WAF blocking detected (HTTP %d)\n" % status_code)
+            waf_list = ["%s (%.0f%%)" % (w, c * 100) for w, c in sorted(detected_wafs.items(), key=lambda x: -x[1])]
+            dataToStdout("\033[01;36m[WAF-PROBE]\033[0m WAF Probe Results: %s\n" % ", ".join(waf_list))
 
     except Exception as ex:
         warnMsg = "[WAF-PROBE] Provocation probe failed: %s" % str(ex)
@@ -1036,7 +1057,7 @@ def autoWafHandler():
             pass
 
     # Phase 3: DalFox-style provocation probe (if WAF detected but not identified)
-    if not kb.autoWafConfidence and conf.url:
+    if not kb.get("autoWafConfidence") and conf.url:
         try:
             probed = probeWaf(conf.url)
             if probed:
@@ -1147,9 +1168,12 @@ def _applyBypassStrategy(strategy):
     mutations = strategy.get("mutations", [])
     delay = strategy.get("delay_ms", 0)
 
-    dataToStdout("\033[01;36m[AUTO-STRATEGY]\033[0m Encodings: %s\n" % ", ".join(encodings) if encodings else "")
-    dataToStdout("\033[01;36m[AUTO-STRATEGY]\033[0m Mutations: %s\n" % ", ".join(mutations) if mutations else "")
-    dataToStdout("\033[01;36m[AUTO-STRATEGY]\033[0m Delay hint: %dms\n" % delay if delay else "")
+    if encodings:
+        dataToStdout("\033[01;36m[AUTO-STRATEGY]\033[0m Encodings: %s\n" % ", ".join(encodings))
+    if mutations:
+        dataToStdout("\033[01;36m[AUTO-STRATEGY]\033[0m Mutations: %s\n" % ", ".join(mutations))
+    if delay:
+        dataToStdout("\033[01;36m[AUTO-STRATEGY]\033[0m Delay hint: %dms\n" % delay)
 
 
 def _applyTampers(tamper_list):
@@ -1179,8 +1203,9 @@ def _applyTampers(tamper_list):
         try:
             from lib.core.option import _setTamperingFunctions
             _setTamperingFunctions()
-        except Exception:
-            pass
+        except Exception as ex:
+            warnMsg = "[AUTO] Failed to reload tamper functions: %s" % getSafeExString(ex)
+            logger.warning(warnMsg)
 
 
 def autoEscalate():

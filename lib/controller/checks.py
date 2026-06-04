@@ -656,6 +656,11 @@ def checkSqlInjection(place, parameter, value):
                                 debugMsg += "used error-based payload ('%s')" % getSafeExString(ex)
                                 logger.debug(debugMsg)
 
+                                # Recoded By Xbibz Official: auto connection error handler for --auto mode
+                                if conf.get("autoMode"):
+                                    from lib.controller.auto import autoConnectionErrorHandler
+                                    autoConnectionErrorHandler("connection_reset")
+
                         # In case of time-based blind or stacked queries
                         # SQL injections
                         elif method == PAYLOAD.METHOD.TIME:
@@ -1080,6 +1085,11 @@ def heuristicCheckSqlInjection(place, parameter):
 
     kb.heuristicTest = HEURISTIC_TEST.CASTED if casting else HEURISTIC_TEST.NEGATIVE if not result else HEURISTIC_TEST.POSITIVE
 
+    # Recoded By Xbibz Official: auto heuristic handler for --auto mode
+    if conf.get("autoMode"):
+        from lib.controller.auto import autoHeuristicHandler
+        autoHeuristicHandler(kb.heuristicTest)
+
     if kb.heavilyDynamic:
         debugMsg = "heuristic check stopped because of heavy dynamicity"
         logger.debug(debugMsg)
@@ -1177,6 +1187,10 @@ def checkDynParam(place, parameter, value):
         payload = agent.payload(place, parameter, value, getUnicode(randInt))
         dynResult = Request.queryPage(payload, place, raise404=False)
     except SqlmapConnectionException:
+        # Recoded By Xbibz Official: auto connection error handler for --auto mode
+        if conf.get("autoMode"):
+            from lib.controller.auto import autoConnectionErrorHandler
+            autoConnectionErrorHandler("timeout")
         pass
 
     result = None if dynResult is None else not dynResult
@@ -1554,6 +1568,17 @@ def checkConnection(suppressOutput=False):
                 conf.url = re.sub(r":\d+(/|\Z)", r":%s\g<1>" % port, conf.url)
 
     except SqlmapConnectionException as ex:
+        # Recoded By Xbibz Official: auto connection error handler for --auto mode
+        if conf.get("autoMode"):
+            try:
+                from lib.controller.auto import autoConnectionErrorHandler
+                if "timeout" in str(ex).lower():
+                    autoConnectionErrorHandler("timeout")
+                elif "reset" in str(ex).lower():
+                    autoConnectionErrorHandler("connection_reset")
+            except Exception:
+                pass
+
         if conf.ipv6:
             warnMsg = "check connection to a provided "
             warnMsg += "IPv6 address with a tool like ping6 "
