@@ -78,19 +78,19 @@ SQLI_PRIORITY_PARAMS = {
 # DOM mining patterns - extract parameter names from HTML/JS
 DOM_PARAM_PATTERNS = [
     # JavaScript variable assignments that look like params
-    re.compile(r'''(?:var|let|const)\s+\w+\s*=\s*['"]?(?:get|fetch|request)Param(?:eter)?\s*\(\s*['"](\w+)['"]''', re.I),
+    re.compile(r"(?:var|let|const)\s+\w+\s*=\s*['\"]?(?:get|fetch|request)Param(?:eter)?\s*\(\s*['\"](\w+)['\"]", re.I),
     # URLSearchParams usage
-    re.compile(r'''URLSearchParams.*?get\s*\(\s*['"](\w+)['"]''', re.I),
+    re.compile(r"URLSearchParams.*?get\s*\(\s*['\"](\w+)['\"]", re.I),
     # jQuery param access
-    re.compile(r'''\$\.(?:get|param)\s*\(\s*['"](\w+)['"]''', re.I),
+    re.compile(r"\$\.(?:get|param)\s*\(\s*['\"](\w+)['\"]", re.I),
     # Form input names
-    re.compile(r'''<input[^>]+name\s*=\s*['"]([^'"]+)['"]''', re.I),
+    re.compile(r"<input[^>]+name\s*=\s*['\"]([^'\"]+)['\"]", re.I),
     # Anchor hrefs with parameters
-    re.compile(r'''href\s*=\s*['"][^'"]*\?(\w+)=', re.I),
+    re.compile(r"href\s*=\s*['\"][^'\"]*\?(\w+)=", re.I),
     # AJAX data params
-    re.compile(r'''data\s*:\s*\{[^}]*(\w+)\s*:', re.I),
+    re.compile(r"data\s*:\s*\{[^}]*(\w+)\s*:", re.I),
     # fetch/axios params
-    re.compile(r'''params\s*:\s*\{[^}]*(\w+)\s*:', re.I),
+    re.compile(r"params\s*:\s*\{[^}]*(\w+)\s*:", re.I),
 ]
 
 # =============================================================================
