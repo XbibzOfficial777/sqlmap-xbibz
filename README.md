@@ -1,14 +1,16 @@
-# sqlmap-xbibz ![](https://i.imgur.com/fe85aVR.png)
+# sqlmap-xbibz
 
-[![Version](https://img.shields.io/badge/version-2.0-red.svg)](https://github.com/XbibzOfficial777/sqlmap-xbibz) [![Python 3.x](https://img.shields.io/badge/python-3.x-yellow.svg)](https://www.python.org/) [![License](https://img.shields.io/badge/license-GPLv2-red.svg)](https://raw.githubusercontent.com/sqlmapproject/sqlmap/master/LICENSE) [![Platform](https://img.shields.io/badge/platform-Linux%20%7C%20macOS%20%7C%20Termux-blue.svg)](https://github.com/XbibzOfficial777/sqlmap-xbibz) [![Recoded](https://img.shields.io/badge/recoded%20by-Xbibz%20Official-orange.svg)](https://github.com/XbibzOfficial777)
+[![sqlmap-xbibz](https://www.imghippo.com/i/taa3472wE.jpg)](https://tiktok.com/@xbibzofficial)
 
-> **Recoded By Xbibz Official v2.0** - Enhanced sqlmap with ParamSpider-style parameter discovery, DalFox-style WAF intelligence, and fully automated mode.
+[![Version](https://img.shields.io/badge/version-3.0-red.svg)](https://github.com/XbibzOfficial777/sqlmap-xbibz) [![Python 3.x](https://img.shields.io/badge/python-3.x-yellow.svg)](https://www.python.org/) [![License](https://img.shields.io/badge/license-GPLv2-red.svg)](https://raw.githubusercontent.com/sqlmapproject/sqlmap/master/LICENSE) [![Platform](https://img.shields.io/badge/platform-Linux%20%7C%20macOS%20%7C%20Termux-blue.svg)](https://github.com/XbibzOfficial777/sqlmap-xbibz) [![Recoded](https://img.shields.io/badge/recoded%20by-Xbibz%20Official-orange.svg)](https://tiktok.com/@xbibzofficial)
+
+> **Recoded By Xbibz Official v3.0** - Enhanced sqlmap with ParamSpider-style parameter discovery, DalFox-style WAF intelligence, and fully automated mode.
 
 ![visitors](https://visitor-badge.laobi.icu/badge?page_id=XbibzOfficial777.sqlmap-xbibz)
 
 ---
 
-## What's New in v2.0
+## What's New in v3.0
 
 | Feature | Description |
 |---------|-------------|
@@ -144,7 +146,7 @@ When WAF is detected but current tamper chain fails:
 
 ## Feature Comparison
 
-| Feature | Original sqlmap | sqlmap-xbibz v2.0 |
+| Feature | Original sqlmap | sqlmap-xbibz v3.0 |
 |---------|----------------|-------------------|
 | `--auto` mode | No | Yes (full automation) |
 | `--spider` param discovery | No | Yes (Wayback + DOM) |
@@ -207,6 +209,7 @@ You can find the [user's manual](https://github.com/sqlmapproject/sqlmap/wiki/Us
 * Original Repository: https://github.com/sqlmapproject/sqlmap
 * This Fork: https://github.com/XbibzOfficial777/sqlmap-xbibz
 * User's manual: https://github.com/sqlmapproject/sqlmap/wiki
+* TikTok: https://tiktok.com/@xbibzofficial
 
 ---
 
