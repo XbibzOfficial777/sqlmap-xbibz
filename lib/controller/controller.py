@@ -650,6 +650,12 @@ def start():
                                     warnMsg = "%sparameter '%s' does not seem to be injectable" % ("%s " % paramType if paramType != parameter else "", parameter)
                                     logger.warning(warnMsg)
 
+                                    # Recoded By Xbibz Official: progressive escalation in --auto mode
+                                    if conf.get("autoMode") and kb.autoWafDetected:
+                                        from lib.controller.auto import autoEscalate
+                                        if not autoEscalate():
+                                            break
+
                             finally:
                                 if place == PLACE.COOKIE:
                                     kb.mergeCookies = popValue()
@@ -786,6 +792,14 @@ def start():
                 warnMsg += "has a maximum connections "
                 warnMsg += "constraint"
                 logger.warning(warnMsg)
+
+            # Recoded By Xbibz Official: auto post-scan summary for --auto mode
+            if conf.get("autoMode"):
+                try:
+                    from lib.controller.auto import autoPostScanHandler
+                    autoPostScanHandler()
+                except Exception:
+                    pass
 
     if kb.dataOutputFlag and not conf.multipleTargets:
         logger.info("fetched data logged to text files under '%s'" % conf.outputPath)
