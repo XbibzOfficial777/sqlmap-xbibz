@@ -1,4 +1,4 @@
-# sqlmap-xbibz
+# SQLMAP REVAMP!
 
 [![sqlmap-xbibz](https://imgbs.com/uploads/sqlmapbibz-57b957d5.jpg)](https://tiktok.com/@xbibzofficial)
 
