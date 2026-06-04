@@ -1,6 +1,6 @@
 # sqlmap-xbibz
 
-[![sqlmap-xbibz](https://api.imghippo.com/files/taa3472wE.jpg)](https://tiktok.com/@xbibzofficial)
+[![sqlmap-xbibz](https://imgbs.com/uploads/sqlmapbibz-57b957d5.jpg)](https://tiktok.com/@xbibzofficial)
 
 [![Version](https://img.shields.io/badge/version-3.0-red.svg)](https://github.com/XbibzOfficial777/sqlmap-xbibz) [![Python 3.x](https://img.shields.io/badge/python-3.x-yellow.svg)](https://www.python.org/) [![License](https://img.shields.io/badge/license-GPLv2-red.svg)](https://raw.githubusercontent.com/sqlmapproject/sqlmap/master/LICENSE) [![Platform](https://img.shields.io/badge/platform-Linux%20%7C%20macOS%20%7C%20Termux-blue.svg)](https://github.com/XbibzOfficial777/sqlmap-xbibz) [![Recoded](https://img.shields.io/badge/recoded%20by-Xbibz%20Official-orange.svg)](https://tiktok.com/@xbibzofficial)
 
