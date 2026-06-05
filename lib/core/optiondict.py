@@ -274,7 +274,7 @@ optDict = {
         "forceDns": "boolean",
         "murphyRate": "integer",
         "smokeTest": "boolean",
-        "autoMode": "string",
+        "autoMode": "boolean",
     },
 
     "API": {

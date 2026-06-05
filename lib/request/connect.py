@@ -88,6 +88,7 @@ from lib.core.enums import PLACE
 from lib.core.enums import POST_HINT
 from lib.core.enums import REDIRECTION
 from lib.core.enums import WEB_PLATFORM
+from lib.controller.auto import autoConnectionErrorHandler
 from lib.core.exception import SqlmapCompressionException
 from lib.core.exception import SqlmapConnectionException
 from lib.core.exception import SqlmapGenericException
@@ -862,6 +863,10 @@ class Connect(object):
                         else:
                             raise SqlmapConnectionException(warnMsg)
                 else:
+                    if code == 429:
+                        autoConnectionErrorHandler("rate_limited")
+                    elif code == 403:
+                        autoConnectionErrorHandler("forbidden")
                     debugMsg = "got HTTP error code: %d ('%s')" % (code, status)
                     logger.debug(debugMsg)
 

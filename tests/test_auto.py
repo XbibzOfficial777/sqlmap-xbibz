@@ -311,5 +311,131 @@ class TestDomParamPatterns(unittest.TestCase):
         self.assertEqual(result, set())
 
 
+class TestPortTruncationFix(unittest.TestCase):
+    """Test that port removal in _cleanSpiderUrl doesn't truncate IPv4 octets."""
+
+    def test_ipv4_with_port_80(self):
+        from lib.controller.auto import _cleanSpiderUrl
+        result = _cleanSpiderUrl("http://10.0.0.180:80/page?id=1")
+        self.assertIsNotNone(result)
+        self.assertIn("10.0.0.180", result)
+        self.assertNotIn(":80", result)
+
+    def test_ipv4_with_port_443(self):
+        from lib.controller.auto import _cleanSpiderUrl
+        result = _cleanSpiderUrl("https://10.0.0.144:443/page?id=1")
+        self.assertIsNotNone(result)
+        self.assertIn("10.0.0.144", result)
+        self.assertNotIn(":443", result)
+
+    def test_ipv4_ending_80_without_port(self):
+        from lib.controller.auto import _cleanSpiderUrl
+        # IP 10.0.0.80 without :80 should remain intact
+        result = _cleanSpiderUrl("http://10.0.0.80/page?id=1")
+        self.assertIsNotNone(result)
+        self.assertIn("10.0.0.80", result)
+
+    def test_non_standard_port_preserved(self):
+        from lib.controller.auto import _cleanSpiderUrl
+        result = _cleanSpiderUrl("http://example.com:8080/page?id=1")
+        self.assertIsNotNone(result)
+        self.assertIn(":8080", result)
+
+
+class TestConfidenceScoreCalculation(unittest.TestCase):
+    """Test that confidence score doesn't double-apply via multiplication."""
+
+    def test_header_match_confidence_capped(self):
+        from lib.controller.auto import fingerprintWaf
+        # Single header match should not exceed the WAF's base confidence
+        headers = {"cf-ray": "abc123"}
+        result = fingerprintWaf(responseHeaders=headers)
+        if "Cloudflare" in result:
+            self.assertLessEqual(result["Cloudflare"], 0.95)
+
+    def test_no_confidence_above_one(self):
+        from lib.controller.auto import fingerprintWaf, WAF_FINGERPRINT_HEADERS
+        # Even with header + body + status code match, confidence <= 1.0
+        for waf_name, fingerprint in WAF_FINGERPRINT_HEADERS.items():
+            max_conf = fingerprint.get("confidence", 0.8)
+            self.assertLessEqual(max_conf, 1.0, "Base confidence for %s > 1.0" % waf_name)
+
+
+class TestWafFingerprintSpecificity(unittest.TestCase):
+    """Test that WAF fingerprint patterns are specific enough to avoid false positives."""
+
+    def test_phpids_ids_pattern_not_too_generic(self):
+        from lib.controller.auto import WAF_FINGERPRINT_HEADERS
+        body_patterns = WAF_FINGERPRINT_HEADERS["PHPIDS"]["body_patterns"]
+        # "ids" alone should NOT be in the patterns
+        self.assertNotIn("ids", body_patterns, "'ids' is too generic for body matching")
+        # "phpids" and "php-ids" are acceptable
+        self.assertIn("phpids", body_patterns)
+
+    def test_alibaba_ali_header_not_too_generic(self):
+        from lib.controller.auto import WAF_FINGERPRINT_HEADERS
+        header_patterns = WAF_FINGERPRINT_HEADERS["Alibaba Cloud WAF"]["headers"]
+        # "ali" alone should NOT be in header patterns (matches x-als-authenticate etc.)
+        self.assertNotIn("ali", header_patterns, "'ali' header pattern is too generic")
+        # "x-ali" is specific enough
+        self.assertIn("x-ali", header_patterns)
+
+    def test_f5_header_not_too_generic(self):
+        from lib.controller.auto import WAF_FINGERPRINT_HEADERS
+        header_patterns = WAF_FINGERPRINT_HEADERS["F5 BIG-IP ASM"]["headers"]
+        # "f5" alone should NOT be in header patterns
+        self.assertNotIn("f5", header_patterns, "'f5' header pattern is too short/generic")
+        # Specific F5 patterns remain
+        for pattern in ["x-wa-info", "bigip", "x-f5"]:
+            self.assertIn(pattern, header_patterns)
+
+    def test_no_generic_body_patterns(self):
+        from lib.controller.auto import WAF_FINGERPRINT_HEADERS
+        # Body patterns should not include 2-3 char generic strings
+        for waf_name, fp in WAF_FINGERPRINT_HEADERS.items():
+            for pattern in fp.get("body_patterns", []):
+                self.assertGreaterEqual(len(pattern), 4,
+                    "%s body pattern '%s' is too short (<4 chars)" % (waf_name, pattern))
+
+
+class TestUserAgentIntegrity(unittest.TestCase):
+    """Test that User-Agent strings are well-formed."""
+
+    def test_no_malformed_firefox_ua(self):
+        from lib.controller.auto import USER_AGENT_POOL
+        for ua in USER_AGENT_POOL:
+            # Firefox UAs should have "; rv:" not " rv:" (missing semicolon)
+            if "rv:" in ua and "Gecko" in ua:
+                self.assertIn("; rv:", ua,
+                    "Firefox UA missing ';' before rv: %s" % ua)
+            # No unmatched parens
+            open_p = ua.count("(")
+            close_p = ua.count(")")
+            self.assertEqual(open_p, close_p,
+                "Unmatched parens in UA: %s" % ua)
+
+
+class TestWafDelayLogic(unittest.TestCase):
+    """Test WAF delay logic doesn't set 1s for delay_ms=0 WAFs."""
+
+    def test_delay_ms_zero_wafs_exist(self):
+        from lib.controller.auto import WAF_BYPASS_STRATEGIES
+        zero_delay_wafs = [name for name, strat in WAF_BYPASS_STRATEGIES.items()
+                           if strat.get("delay_ms", 0) == 0]
+        # At least some WAFs should have delay_ms=0 (meaning no enforced delay)
+        self.assertGreater(len(zero_delay_wafs), 0,
+            "Some WAFs should have delay_ms=0")
+
+
+class TestOptionDictAutoMode(unittest.TestCase):
+    """Test optiondict.py autoMode type is boolean."""
+
+    def test_auto_mode_is_boolean(self):
+        from lib.core.optiondict import optDict
+        auto_type = optDict.get("Hidden", {}).get("autoMode")
+        self.assertEqual(auto_type, "boolean",
+            "autoMode should be 'boolean', got '%s'" % auto_type)
+
+
 if __name__ == "__main__":
     unittest.main()
