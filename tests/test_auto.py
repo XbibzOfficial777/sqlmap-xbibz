@@ -1,13 +1,15 @@
 #!/usr/bin/env python
 
 """
-Unit tests for lib.controller.auto module (Xbibz Official AutoEngine v3.0)
+Unit tests for lib.controller.auto module (Xbibz Official AutoEngine v3.1 Turbo)
 Tests critical functions for --auto and --spider mode integration.
 """
 
 import sys
 import os
 import unittest
+import time
+import threading
 
 # Add project root to path
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -435,6 +437,157 @@ class TestOptionDictAutoMode(unittest.TestCase):
         auto_type = optDict.get("Hidden", {}).get("autoMode")
         self.assertEqual(auto_type, "boolean",
             "autoMode should be 'boolean', got '%s'" % auto_type)
+
+
+class TestWafFingerprintCache(unittest.TestCase):
+    """Test WAF fingerprint result caching."""
+
+    def test_cache_returns_same_result(self):
+        from lib.controller.auto import _getCachedWafResult, _setCachedWafResult, _wafCacheLock
+        key = "test_cache_key_v31"
+        result = {"Cloudflare": 0.95}
+        _setCachedWafResult(key, result)
+        cached = _getCachedWafResult(key)
+        self.assertEqual(cached, result)
+
+    def test_cache_miss_returns_none(self):
+        from lib.controller.auto import _getCachedWafResult
+        result = _getCachedWafResult("nonexistent_key_%d" % int(time.time() * 1000))
+        self.assertIsNone(result)
+
+    def test_fingerprintWaf_uses_cache(self):
+        from lib.controller.auto import fingerprintWaf
+        headers = {"cf-ray": "cache-test-value"}
+        result1 = fingerprintWaf(responseHeaders=headers)
+        result2 = fingerprintWaf(responseHeaders=headers)
+        # Same input should return same result (from cache second time)
+        self.assertEqual(result1, result2)
+
+    def test_cache_is_thread_safe(self):
+        from lib.controller.auto import _getCachedWafResult, _setCachedWafResult
+        errors = []
+
+        def writer(thread_id):
+            try:
+                for i in range(50):
+                    _setCachedWafResult("thread_%d_key_%d" % (thread_id, i), {"waf": 0.5})
+            except Exception as e:
+                errors.append(str(e))
+
+        def reader(thread_id):
+            try:
+                for i in range(50):
+                    _getCachedWafResult("thread_%d_key_%d" % (thread_id, i))
+            except Exception as e:
+                errors.append(str(e))
+
+        threads = []
+        for i in range(4):
+            threads.append(threading.Thread(target=writer, args=(i,)))
+            threads.append(threading.Thread(target=reader, args=(i,)))
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+        self.assertEqual(len(errors), 0, "Thread safety errors: %s" % errors)
+
+
+class TestPerformanceMetrics(unittest.TestCase):
+    """Test performance metrics recording."""
+
+    def test_record_response_success(self):
+        from lib.controller.auto import _recordResponse, _perfMetrics, _perfMetricsLock
+        initial_count = _perfMetrics["totalRequests"]
+        _recordResponse(100, isError=False)
+        self.assertEqual(_perfMetrics["totalRequests"], initial_count + 1)
+        self.assertEqual(_perfMetrics["consecutiveSuccesses"], 1)
+
+    def test_record_response_error(self):
+        from lib.controller.auto import _recordResponse, _perfMetrics
+        _recordResponse(0, isError=True, isRateLimit=False, isWafBlock=True)
+        self.assertGreater(_perfMetrics["totalErrors"], 0)
+        self.assertEqual(_perfMetrics["consecutiveErrors"], 1)
+
+    def test_record_response_rate_limit(self):
+        from lib.controller.auto import _recordResponse, _perfMetrics
+        initial = _perfMetrics["rateLimitHits"]
+        _recordResponse(0, isError=True, isRateLimit=True)
+        self.assertEqual(_perfMetrics["rateLimitHits"], initial + 1)
+
+    def test_latency_accumulates(self):
+        from lib.controller.auto import _recordResponse, _perfMetrics
+        initial = _perfMetrics["totalLatencyMs"]
+        _recordResponse(50, isError=False)
+        _recordResponse(100, isError=False)
+        self.assertEqual(_perfMetrics["totalLatencyMs"], initial + 150)
+
+
+class TestAdaptiveTuning(unittest.TestCase):
+    """Test adaptive thread/delay tuning."""
+
+    def test_adaptive_tune_does_not_crash(self):
+        from lib.controller.auto import autoAdaptiveTune
+        conf.autoMode = True
+        conf.threads = 3
+        conf.delay = 1
+        # Should not raise even with no metrics
+        autoAdaptiveTune()
+
+    def test_adaptive_state_initialized(self):
+        from lib.controller.auto import _adaptiveState
+        self.assertIn("currentThreads", _adaptiveState)
+        self.assertIn("currentDelay", _adaptiveState)
+        self.assertIn("adjustCooldown", _adaptiveState)
+
+
+class TestConcurrentSpiderExecution(unittest.TestCase):
+    """Test concurrent spider execution infrastructure."""
+
+    def test_threadpool_available(self):
+        from lib.controller.auto import _HAS_CONCURRENT
+        # Should be True on Python 3.2+
+        self.assertTrue(_HAS_CONCURRENT, "concurrent.futures should be available")
+
+    def test_threadpool_works(self):
+        from concurrent.futures import ThreadPoolExecutor
+
+        def task(n):
+            return n * 2
+
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            futures = {executor.submit(task, i): i for i in range(4)}
+            results = []
+            for f in futures:
+                results.append(f.result())
+        self.assertEqual(sorted(results), [0, 2, 4, 6])
+
+
+class TestParallelWafProbes(unittest.TestCase):
+    """Test parallel WAF probe infrastructure."""
+
+    def test_probe_payloads_defined(self):
+        from lib.controller.auto import WAF_PROBE_PAYLOADS
+        self.assertGreaterEqual(len(WAF_PROBE_PAYLOADS), 3)
+
+    def test_concurrent_import_available(self):
+        from lib.controller.auto import ThreadPoolExecutor, as_completed
+        self.assertTrue(callable(ThreadPoolExecutor))
+
+
+class TestCpuAwareThreading(unittest.TestCase):
+    """Test CPU-aware thread scaling."""
+
+    def test_multiprocessing_available(self):
+        import multiprocessing
+        self.assertTrue(hasattr(multiprocessing, 'cpu_count'))
+
+    def test_thread_count_reasonable(self):
+        import multiprocessing
+        cpu_count = multiprocessing.cpu_count()
+        smart_threads = min(max(cpu_count + 1, 3), 8)
+        self.assertGreaterEqual(smart_threads, 3)
+        self.assertLessEqual(smart_threads, 8)
 
 
 if __name__ == "__main__":

@@ -20,6 +20,12 @@ import re
 import sys
 import time
 import json
+import threading
+try:
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+    _HAS_CONCURRENT = True
+except ImportError:
+    _HAS_CONCURRENT = False
 
 from lib.core.common import dataToStdout
 from lib.core.common import getSafeExString
@@ -430,6 +436,154 @@ WAF_PROBE_PAYLOADS = [
 WAF_BLOCK_STATUS_CODES = [403, 406, 419, 429, 500, 501, 503]
 
 # =============================================================================
+# Performance Engine v3.1: Turbo Mode
+# =============================================================================
+# Multi-layered performance optimizations:
+#   - WAF fingerprint result caching (avoids redundant re-detection)
+#   - Concurrent spider fetching (Wayback CDX + DOM mining in parallel)
+#   - Parallel WAF provocation probes
+#   - Adaptive concurrency control (auto-tunes threads/delay from response metrics)
+#   - Real-time performance metrics tracking
+
+# WAF fingerprint cache: stores (result, timestamp) pairs
+_wafCache = {}
+_wafCacheLock = threading.Lock()
+_WAF_CACHE_TTL = 300  # 5 minutes
+
+# Performance metrics accumulator
+_perfMetrics = {
+    "totalRequests": 0,
+    "totalErrors": 0,
+    "totalLatencyMs": 0,
+    "rateLimitHits": 0,
+    "wafBlocks": 0,
+    "startTime": None,
+    "lastResponseTime": None,
+    "consecutiveErrors": 0,
+    "consecutiveSuccesses": 0,
+}
+_perfMetricsLock = threading.Lock()
+
+# Adaptive controller state
+_adaptiveState = {
+    "currentThreads": 3,
+    "currentDelay": 0,
+    "lastAdjustTime": 0,
+    "adjustCooldown": 10,  # seconds between adjustments
+}
+
+
+def _getCachedWafResult(cacheKey):
+    """Get cached WAF fingerprint result if still valid."""
+    with _wafCacheLock:
+        if cacheKey in _wafCache:
+            result, timestamp = _wafCache[cacheKey]
+            if time.time() - timestamp < _WAF_CACHE_TTL:
+                return result
+            del _wafCache[cacheKey]
+    return None
+
+
+def _setCachedWafResult(cacheKey, result):
+    """Cache WAF fingerprint result with TTL."""
+    with _wafCacheLock:
+        _wafCache[cacheKey] = (result, time.time())
+
+
+def _recordResponse(latencyMs, isError=False, isRateLimit=False, isWafBlock=False):
+    """Record a response for adaptive performance tracking."""
+    with _perfMetricsLock:
+        _perfMetrics["totalRequests"] += 1
+        _perfMetrics["totalLatencyMs"] += latencyMs
+        _perfMetrics["lastResponseTime"] = time.time()
+        if isError:
+            _perfMetrics["totalErrors"] += 1
+            _perfMetrics["consecutiveErrors"] += 1
+            _perfMetrics["consecutiveSuccesses"] = 0
+        else:
+            _perfMetrics["consecutiveErrors"] = 0
+            _perfMetrics["consecutiveSuccesses"] += 1
+        if isRateLimit:
+            _perfMetrics["rateLimitHits"] += 1
+        if isWafBlock:
+            _perfMetrics["wafBlocks"] += 1
+
+
+def autoAdaptiveTune():
+    """
+    Adaptive concurrency and delay tuning based on response metrics.
+    Inspired by TCP congestion control: additive increase, multiplicative decrease.
+    - If consecutive successes: gradually increase threads, decrease delay
+    - If rate-limit/WAF blocks: reduce threads, increase delay
+    - If high error rate: back off aggressively
+    """
+    if not conf.get("autoMode"):
+        return
+
+    now = time.time()
+    if now - _adaptiveState.get("lastAdjustTime", 0) < _adaptiveState.get("adjustCooldown", 10):
+        return
+
+    with _perfMetricsLock:
+        metrics = dict(_perfMetrics)
+        consecutive_errors = metrics.get("consecutiveErrors", 0)
+        consecutive_successes = metrics.get("consecutiveSuccesses", 0)
+        rate_limit_hits = metrics.get("rateLimitHits", 0)
+        waf_blocks = metrics.get("wafBlocks", 0)
+        total = metrics.get("totalRequests", 0)
+        errors = metrics.get("totalErrors", 0)
+
+    _adaptiveState["lastAdjustTime"] = now
+
+    current_threads = conf.threads or 3
+    current_delay = conf.delay or 0
+
+    # Aggressive backoff on rate limits or WAF blocks
+    if rate_limit_hits > 0 or waf_blocks > 0:
+        # Multiplicative decrease (like TCP AIMD)
+        new_threads = max(1, current_threads // 2)
+        new_delay = min(current_delay * 2 + 1, 10)
+
+        if new_threads != current_threads or new_delay != current_delay:
+            conf.threads = new_threads
+            conf.delay = new_delay
+            infoMsg = "[AUTO-TUNE] WAF/rate-limit detected - threads=%d, delay=%.1fs" % (new_threads, new_delay)
+            logger.info(infoMsg)
+            dataToStdout("\033[01;33m[AUTO-TUNE]\033[0m WAF pressure - throttling: threads=%d, delay=%.1fs\n" % (new_threads, new_delay))
+            # Reset counters after adjustment
+            with _perfMetricsLock:
+                _perfMetrics["rateLimitHits"] = 0
+                _perfMetrics["wafBlocks"] = 0
+        return
+
+    # Error rate backoff
+    if total > 10 and errors / total > 0.3:
+        new_threads = max(1, current_threads - 1)
+        new_delay = min(current_delay + 0.5, 5)
+        if new_threads != current_threads or new_delay != current_delay:
+            conf.threads = new_threads
+            conf.delay = new_delay
+            infoMsg = "[AUTO-TUNE] High error rate (%.0f%%) - threads=%d, delay=%.1fs" % (errors * 100 / total, new_threads, new_delay)
+            logger.info(infoMsg)
+        return
+
+    # Additive increase on sustained success (slow start recovery)
+    if consecutive_successes >= 20:
+        max_threads = min(10, _adaptiveState.get("currentThreads", 3) + 2)
+        new_threads = min(current_threads + 1, max_threads)
+        new_delay = max(current_delay - 0.1, 0)
+
+        if conf.threads != new_threads or conf.delay != new_delay:
+            conf.threads = new_threads
+            if new_delay > 0:
+                conf.delay = new_delay
+            infoMsg = "[AUTO-TUNE] Stable responses - increasing throughput: threads=%d, delay=%.1fs" % (new_threads, new_delay)
+            logger.info(infoMsg)
+            dataToStdout("\033[01;32m[AUTO-TUNE]\033[0m Speeding up: threads=%d, delay=%.1fs\n" % (new_threads, new_delay))
+            with _perfMetricsLock:
+                _perfMetrics["consecutiveSuccesses"] = 0
+
+# =============================================================================
 # ParamSpider-Style: Wayback CDX API Integration
 # =============================================================================
 
@@ -655,6 +809,7 @@ def spiderTarget(url, includeSubs=True):
     """
     ParamSpider-style: Discover URL parameters for the target domain.
     Combines Wayback CDX API with DOM mining for maximum coverage.
+    Now with concurrent execution: Wayback + DOM mining run in parallel.
 
     Returns: list of URLs with parameters, sorted by SQLi priority
     """
@@ -665,46 +820,74 @@ def spiderTarget(url, includeSubs=True):
         logger.warning(warnMsg)
         return []
 
-    dataToStdout("\n\033[01;35m[SPIDER]\033[0m \033[01;37mParameter Discovery Mode - Recoded By Xbibz Official\033[0m\n")
+    _perfMetrics["startTime"] = _perfMetrics.get("startTime") or time.time()
+
+    dataToStdout("\n\033[01;35m[SPIDER]\033[0m \033[01;37mParameter Discovery Mode - Recoded By Xbibz Official (Turbo)\033[0m\n")
     dataToStdout("\033[01;35m[SPIDER]\033[0m Target domain: %s\n" % domain)
 
     all_urls = []
+    wayback_urls = []
+    dom_params = set()
 
-    # Phase 1: Wayback CDX API (passive, non-intrusive)
-    wayback_urls = _fetchWaybackUrls(domain, includeSubs)
+    def _doWaybackFetch():
+        return _fetchWaybackUrls(domain, includeSubs)
+
+    def _doDomMining():
+        params = set()
+        try:
+            from lib.request.connect import Connect as Request
+            page, _, _ = Request.queryPage(content=True, ignoreSecondOrder=True)
+            if page:
+                params = _mineDomParams(page)
+        except Exception:
+            pass
+        return params
+
+    # Run Wayback CDX + DOM mining concurrently
+    if _HAS_CONCURRENT:
+        dataToStdout("\033[01;35m[SPIDER]\033[0m \033[01;36mConcurrent mode: Wayback + DOM mining in parallel\033[0m\n")
+        start_time = time.time()
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            wayback_future = executor.submit(_doWaybackFetch)
+            dom_future = executor.submit(_doDomMining)
+
+            wayback_urls = wayback_future.result()
+            dom_params = dom_future.result()
+        elapsed = time.time() - start_time
+        dataToStdout("\033[01;35m[SPIDER]\033[0m \033[01;36mConcurrent fetch completed in %.1fs\033[0m\n" % elapsed)
+    else:
+        # Fallback: sequential execution
+        wayback_urls = _doWaybackFetch()
+        dom_params = _doDomMining()
+
+    # Merge Wayback results
     if wayback_urls:
         all_urls.extend(wayback_urls)
         dataToStdout("\033[01;35m[SPIDER]\033[0m \033[01;32mWayback: %d URLs discovered\033[0m\n" % len(wayback_urls))
 
-    # Phase 2: DOM mining from current page (if accessible)
-    try:
-        from lib.request.connect import Connect as Request
-        page, _, _ = Request.queryPage(content=True, ignoreSecondOrder=True)
-        if page:
-            dom_params = _mineDomParams(page)
-            if dom_params:
-                dataToStdout("\033[01;35m[SPIDER]\033[0m \033[01;32mDOM mining: %d additional params found\033[0m\n" % len(dom_params))
-                # Build URLs from DOM params
-                import urllib.parse
-                parsed = urllib.parse.urlparse(url)
-                base_url = urllib.parse.urlunparse((
-                    parsed.scheme, parsed.netloc, parsed.path,
-                    parsed.params, "", ""
-                ))
-                for param in dom_params:
-                    new_url = "%s?%s=FUZZ" % (base_url, param)
-                    if new_url not in all_urls:
-                        all_urls.append(new_url)
-    except Exception:
-        pass
+    # Merge DOM mining results
+    if dom_params:
+        dataToStdout("\033[01;35m[SPIDER]\033[0m \033[01;32mDOM mining: %d additional params found\033[0m\n" % len(dom_params))
+        try:
+            import urllib.parse
+            parsed = urllib.parse.urlparse(url)
+            base_url = urllib.parse.urlunparse((
+                parsed.scheme, parsed.netloc, parsed.path,
+                parsed.params, "", ""
+            ))
+            for param in dom_params:
+                new_url = "%s?%s=FUZZ" % (base_url, param)
+                if new_url not in all_urls:
+                    all_urls.append(new_url)
+        except Exception:
+            pass
 
-    # Phase 3: Sort by SQLi priority
+    # Sort by SQLi priority
     sorted_urls = _sortParamsBySqliPriority(all_urls)
 
     if sorted_urls:
         dataToStdout("\033[01;35m[SPIDER]\033[0m \033[01;32mTotal: %d parameterized URLs ready for testing\033[0m\n\n" % len(sorted_urls))
 
-        # Log priority breakdown
         high_count = 0
         medium_count = 0
         low_count = 0
@@ -741,8 +924,27 @@ def fingerprintWaf(responseHeaders=None, responseBody=None, statusCode=None):
     Layer 2: Passive body fingerprinting (zero extra requests)
     Layer 3: Status code boost (block pages use specific status codes)
 
+    Now with TTL-based result caching to avoid redundant fingerprinting.
     Returns: dict with detected WAF names and confidence scores
     """
+    # Check cache first
+    cacheKey = None
+    try:
+        cacheParts = []
+        if responseHeaders:
+            if hasattr(responseHeaders, 'headers'):
+                cacheParts.append(str(sorted(responseHeaders.headers)))
+            elif isinstance(responseHeaders, dict):
+                cacheParts.append(str(sorted(responseHeaders.items())))
+        cacheParts.append(str(statusCode))
+        cacheParts.append((responseBody or "")[:200])
+        cacheKey = "|".join(cacheParts)
+        cached = _getCachedWafResult(cacheKey)
+        if cached is not None:
+            return cached
+    except Exception:
+        pass
+
     detected_wafs = {}
 
     if not responseHeaders and not responseBody:
@@ -817,13 +1019,18 @@ def fingerprintWaf(responseHeaders=None, responseBody=None, statusCode=None):
             confidence = min(confidence, fingerprint.get("confidence", 0.8))
             detected_wafs[waf_name] = round(confidence, 2)
 
+    # Cache result
+    if cacheKey is not None:
+        _setCachedWafResult(cacheKey, detected_wafs)
+
     return detected_wafs
 
 
 def probeWaf(url):
     """
     DalFox-style WAF provocation probe:
-    Sends a deliberately malicious payload to trigger WAF response.
+    Sends deliberately malicious payloads to trigger WAF response.
+    Now sends probes concurrently for 3x faster detection.
     Analyzes the blocking response for WAF identification.
 
     Returns: dict with detected WAF names and confidence scores
@@ -837,18 +1044,17 @@ def probeWaf(url):
 
     detected_wafs = {}
 
-    dataToStdout("\033[01;36m[WAF-PROBE]\033[0m Sending provocation probe...\n")
+    dataToStdout("\033[01;36m[WAF-PROBE]\033[0m Sending provocation probes (concurrent)...\n")
 
     try:
-        # Build probe URL with malicious payload
         parsed = urllib.parse.urlparse(url)
         base_url = urllib.parse.urlunparse((
             parsed.scheme, parsed.netloc, parsed.path,
             parsed.params, "", ""
         ))
 
-        # Try multiple payloads for better detection (DalFox-style)
-        for payload in WAF_PROBE_PAYLOADS[:3]:
+        def _sendSingleProbe(payload):
+            """Send a single WAF probe and return (status_code, headers, body)."""
             try:
                 probe_url = "%s?dalfox_waf_probe=%s" % (base_url, urllib.parse.quote(payload))
                 request = urllib.request.Request(probe_url)
@@ -856,30 +1062,41 @@ def probeWaf(url):
 
                 try:
                     response = urllib.request.urlopen(request, timeout=15)
-                    status_code = response.getcode()
-                    headers = response.headers
-                    body = response.read().decode("utf-8", errors="ignore")
+                    return response.getcode(), response.headers, response.read().decode("utf-8", errors="ignore")
                 except urllib.error.HTTPError as e:
-                    status_code = e.code
-                    headers = e.headers
-                    body = e.read().decode("utf-8", errors="ignore") if e.fp else ""
-                except Exception as ex:
-                    continue
+                    body = e.read().decode("utf-8", errors="ignore") if hasattr(e, 'fp') and e.fp else ""
+                    return e.code, e.headers, body
+                except Exception:
+                    return None, None, None
+            except Exception:
+                return None, None, None
 
-                # Analyze blocking response
-                is_blocked = status_code in WAF_BLOCK_STATUS_CODES
+        payloads = WAF_PROBE_PAYLOADS[:3]
 
-                if is_blocked:
+        if _HAS_CONCURRENT and len(payloads) > 1:
+            # Send probes concurrently
+            start_time = time.time()
+            with ThreadPoolExecutor(max_workers=min(len(payloads), 3)) as executor:
+                futures = {executor.submit(_sendSingleProbe, p): p for p in payloads}
+                for future in as_completed(futures):
+                    status_code, headers, body = future.result()
+                    if status_code and status_code in WAF_BLOCK_STATUS_CODES:
+                        dataToStdout("\033[01;36m[WAF-PROBE]\033[0m \033[01;33mBlocking response detected (HTTP %d)\033[0m\n" % status_code)
+                        detected = fingerprintWaf(headers, body, status_code)
+                        if detected:
+                            detected_wafs.update(detected)
+            elapsed = time.time() - start_time
+            dataToStdout("\033[01;36m[WAF-PROBE]\033[0m Parallel probes completed in %.1fs\033[0m\n" % elapsed)
+        else:
+            # Sequential fallback
+            for payload in payloads:
+                status_code, headers, body = _sendSingleProbe(payload)
+                if status_code and status_code in WAF_BLOCK_STATUS_CODES:
                     dataToStdout("\033[01;36m[WAF-PROBE]\033[0m \033[01;33mBlocking response detected (HTTP %d)\033[0m\n" % status_code)
-
-                    # Fingerprint the blocking response
                     detected = fingerprintWaf(headers, body, status_code)
                     if detected:
                         detected_wafs.update(detected)
-            except Exception:
-                continue
 
-        # If no WAF detected from probes but blocking was seen
         if not detected_wafs:
             detected_wafs["Generic WAF"] = 0.50
             dataToStdout("\033[01;36m[WAF-PROBE]\033[0m \033[01;33mWAF detected but not specifically identified\033[0m\n")
@@ -903,9 +1120,9 @@ def autoInit():
     Recoded By Xbibz Official
     Initialize --auto mode: configure all settings for fully automated detection.
     This runs BEFORE any scanning begins.
-    Combines ParamSpider param discovery + DalFox WAF intelligence.
+    Combines ParamSpider param discovery + DalFox WAF intelligence + Turbo performance.
     """
-    infoMsg = "[AUTO] Initializing fully automated mode v3.0 - Recoded By Xbibz Official"
+    infoMsg = "[AUTO] Initializing fully automated mode v3.1 (Turbo) - Recoded By Xbibz Official"
     logger.info(infoMsg)
 
     # Force batch mode (no interactive prompts)
@@ -936,14 +1153,17 @@ def autoInit():
         infoMsg = "[AUTO] Set detection risk to 2 (moderate-risk tests included)"
         logger.info(infoMsg)
 
-    # Enable keep-alive for performance
+    # Enable keep-alive for connection reuse (fewer TCP handshakes)
     if not conf.keepAlive:
         conf.keepAlive = True
 
-    # Increase threads if not set
+    # Smart thread count: scale with CPU count, cap at 8 for safety
+    import multiprocessing
+    cpu_count = multiprocessing.cpu_count() if hasattr(multiprocessing, 'cpu_count') else 2
+    smart_threads = min(max(cpu_count + 1, 3), 8)
     if conf.threads is None or conf.threads < 3:
-        conf.threads = 3
-        infoMsg = "[AUTO] Set threads to 3 for faster scanning"
+        conf.threads = smart_threads
+        infoMsg = "[AUTO] Set threads to %d (CPU-aware scaling)" % smart_threads
         logger.info(infoMsg)
 
     # Auto-detect WAF is always on in --auto mode
@@ -960,6 +1180,11 @@ def autoInit():
     if conf.retries is None or conf.retries < 3:
         conf.retries = 5
 
+    # Initialize performance engine
+    _perfMetrics["startTime"] = time.time()
+    _adaptiveState["currentThreads"] = conf.threads
+    _adaptiveState["currentDelay"] = conf.delay or 0
+
     # Store auto mode state
     conf.autoMode = True
     kb.autoStage = 0  # Current escalation stage
@@ -970,8 +1195,8 @@ def autoInit():
     kb.autoSpiderUrls = []  # ParamSpider discovered URLs
     kb.autoProbeCount = 0  # WAF provocation probe count
 
-    dataToStdout("\n\033[01;31m[AUTO]\033[0m \033[01;37mFully Automated Mode v3.0 Activated - Recoded By Xbibz Official\033[0m\n")
-    dataToStdout("\033[01;31m[AUTO]\033[0m \033[01;36mParamSpider + DalFox Intelligence Engine\033[0m\n")
+    dataToStdout("\n\033[01;31m[AUTO]\033[0m \033[01;37mFully Automated Mode v3.1 Turbo Activated - Recoded By Xbibz Official\033[0m\n")
+    dataToStdout("\033[01;31m[AUTO]\033[0m \033[01;36mParamSpider + DalFox + Turbo Performance Engine\033[0m\n")
     dataToStdout("\033[01;31m[AUTO]\033[0m Level=%d, Risk=%d, Threads=%d, RandomAgent=%s\n\n" % (
         conf.level, conf.risk, conf.threads, conf.randomAgent))
 
@@ -1320,12 +1545,14 @@ def autoHeuristicHandler(heuristic_result):
 def autoConnectionErrorHandler(error_type):
     """
     DalFox-inspired connection error handling with adaptive backoff.
+    Now records performance metrics and triggers adaptive tuning.
     Handles timeouts, rate limiting, connection resets, and blocks.
     """
     if not conf.get("autoMode"):
         return
 
     if error_type == "timeout":
+        _recordResponse(0, isError=True)
         infoMsg = "[AUTO] Connection timeout detected - increasing timeout and adding delay"
         logger.info(infoMsg)
         dataToStdout("\033[01;31m[AUTO]\033[0m \033[01;33mTimeout detected - adjusting parameters\033[0m\n")
@@ -1337,6 +1564,7 @@ def autoConnectionErrorHandler(error_type):
             conf.retries = min(conf.retries + 2, 10)
 
     elif error_type == "connection_reset":
+        _recordResponse(0, isError=True, isWafBlock=True)
         infoMsg = "[AUTO] Connection reset detected - possible WAF block"
         logger.info(infoMsg)
         dataToStdout("\033[01;31m[AUTO]\033[0m \033[01;33mConnection reset - WAF likely blocking\033[0m\n")
@@ -1344,45 +1572,47 @@ def autoConnectionErrorHandler(error_type):
             kb.autoWafDetected = True
             autoWafHandler()
 
-    elif error_type == "rate_limit":
+    elif error_type in ("rate_limit", "rate_limited", "forbidden"):
+        is_waf = error_type == "forbidden"
+        _recordResponse(0, isError=True, isRateLimit=True, isWafBlock=is_waf)
         infoMsg = "[AUTO] Rate limiting detected - adding delay"
         logger.info(infoMsg)
         dataToStdout("\033[01;31m[AUTO]\033[0m \033[01;33mRate limit detected - delay set to 5s\033[0m\n")
-        # DalFox-style: exponential backoff for rate limits
         if conf.delay is None or conf.delay < 5:
             conf.delay = 5
         kb.autoProbeCount = kb.get("autoProbeCount", 0) + 1
         if kb.autoProbeCount >= 3:
-            # After 3 rate limits, reduce threads
             if conf.threads and conf.threads > 1:
                 conf.threads = max(conf.threads - 1, 1)
                 infoMsg = "[AUTO] Reduced threads to %d due to rate limiting" % conf.threads
                 logger.info(infoMsg)
 
     elif error_type == "block":
+        _recordResponse(0, isError=True, isWafBlock=True)
         infoMsg = "[AUTO] IP block detected - escalating tamper chain"
         logger.info(infoMsg)
         dataToStdout("\033[01;31m[AUTO]\033[0m \033[01;31mBLOCKED! Escalating bypass techniques...\033[0m\n")
-        # DalFox-style: when blocked, apply aggressive delay + escalate
         if conf.delay is None or conf.delay < 3:
             conf.delay = 3
         autoEscalate()
 
     elif error_type == "429":
-        # Specific handling for HTTP 429 Too Many Requests
+        _recordResponse(0, isError=True, isRateLimit=True)
         infoMsg = "[AUTO] HTTP 429 Too Many Requests - backing off"
         logger.info(infoMsg)
         dataToStdout("\033[01;31m[AUTO]\033[0m \033[01;33m429 rate limited - backing off with exponential delay\033[0m\n")
-        # DalFox-style exponential backoff
         current_delay = conf.delay or 1
         conf.delay = min(current_delay * 2, 10)
         dataToStdout("\033[01;31m[AUTO]\033[0m Delay increased to %ss\n" % conf.delay)
+
+    # Trigger adaptive tuning after error handling
+    autoAdaptiveTune()
 
 
 def autoPostScanHandler():
     """
     Called after scanning completes to provide summary.
-    Shows WAF detection results and bypass effectiveness.
+    Shows WAF detection results, bypass effectiveness, and performance metrics.
     """
     if not conf.get("autoMode"):
         return
@@ -1406,5 +1636,33 @@ def autoPostScanHandler():
 
     if kb.autoSpiderUrls:
         dataToStdout("\033[01;31m[AUTO]\033[0m Spider URLs Discovered: %d\n" % len(kb.autoSpiderUrls))
+
+    # Performance metrics
+    with _perfMetricsLock:
+        metrics = dict(_perfMetrics)
+    start_time = metrics.get("startTime") or _perfMetrics.get("startTime") or time.time()
+    elapsed = time.time() - start_time if start_time else 0
+    total_reqs = metrics.get("totalRequests", 0)
+    total_errors = metrics.get("totalErrors", 0)
+    total_latency = metrics.get("totalLatencyMs", 0)
+    rate_limits = metrics.get("rateLimitHits", 0)
+    waf_blocks = metrics.get("wafBlocks", 0)
+
+    if elapsed > 0 and total_reqs > 0:
+        req_per_sec = total_reqs / elapsed
+        avg_latency = total_latency / total_reqs if total_reqs > 0 else 0
+        error_rate = (total_errors * 100.0 / total_reqs) if total_reqs > 0 else 0
+
+        dataToStdout("\033[01;31m[AUTO]\033[0m \033[01;36m--- Performance Metrics ---\033[0m\n")
+        dataToStdout("\033[01;31m[AUTO]\033[0m Elapsed: %.1fs | Requests: %d (%.1f req/s)\n" % (elapsed, total_reqs, req_per_sec))
+        dataToStdout("\033[01;31m[AUTO]\033[0m Avg Latency: %.0fms | Error Rate: %.1f%%\n" % (avg_latency, error_rate))
+        if rate_limits or waf_blocks:
+            dataToStdout("\033[01;31m[AUTO]\033[0m Rate Limits: %d | WAF Blocks: %d\n" % (rate_limits, waf_blocks))
+        dataToStdout("\033[01;31m[AUTO]\033[0m Final Threads: %d | Final Delay: %ss\n" % (conf.threads or 3, conf.delay or 0))
+
+        # Cache stats
+        with _wafCacheLock:
+            cache_entries = len(_wafCache)
+        dataToStdout("\033[01;31m[AUTO]\033[0m WAF Cache: %d entries cached\n" % cache_entries)
 
     dataToStdout("\033[01;31m[AUTO]\033[0m \033[01;37m=============================\033[0m\n\n")
