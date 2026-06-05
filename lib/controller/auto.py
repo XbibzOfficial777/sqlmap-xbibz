@@ -168,8 +168,8 @@ WAF_FINGERPRINT_HEADERS = {
 
     # Load Balancers / Proxies
     "F5 BIG-IP ASM": {
-        "headers": ["x-wa-info", "bigip", "f5", "x-f5"],
-        "body_patterns": ["bigip", "f5", "support id", "your request was intercepted"],
+        "headers": ["x-wa-info", "bigip", "x-f5"],
+        "body_patterns": ["bigip", "support id", "your request was intercepted", "f5 networks"],
         "confidence": 0.90,
     },
     "Barracuda": {
@@ -200,7 +200,7 @@ WAF_FINGERPRINT_HEADERS = {
         "confidence": 0.87,
     },
     "Alibaba Cloud WAF": {
-        "headers": ["x-acs", "ali"],
+        "headers": ["x-acs", "x-ali"],
         "body_patterns": ["alibaba", "aliyun", "tianji"],
         "confidence": 0.87,
     },
@@ -233,7 +233,7 @@ WAF_FINGERPRINT_HEADERS = {
     },
     "PHPIDS": {
         "headers": [],
-        "body_patterns": ["phpids", "ids"],
+        "body_patterns": ["phpids", "php-ids"],
         "confidence": 0.80,
     },
     "Juniper WebApp": {
@@ -443,7 +443,7 @@ USER_AGENT_POOL = [
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Safari/605.1.15",
     "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36 Edg/120.0.0.0",
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) rv:121.0) Gecko/20100101 Firefox/121.0",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:121.0) Gecko/20100101 Firefox/121.0",
     "Mozilla/5.0 (X11; Ubuntu; Linux x86_64; rv:121.0) Gecko/20100101 Firefox/121.0",
 ]
 
@@ -468,7 +468,7 @@ def _fetchWaybackUrls(domain, includeSubs=True):
         # Build CDX API URL
         wildcard = "*." if includeSubs else ""
         cdx_url = "%s?url=%s%s/*&output=txt&collapse=urlkey&fl=original&page=/" % (
-            WAYBACK_CDX_API, wildcard, domain
+            WAYBACK_CDX_API, wildcard, urllib.parse.quote(domain, safe="")
         )
 
         infoMsg = "[SPIDER] Querying Wayback CDX API for domain: %s" % domain
@@ -533,9 +533,9 @@ def _cleanSpiderUrl(url, placeholder="FUZZ"):
         # Remove redundant ports
         netloc = parsed.netloc
         if parsed.scheme == "http" and netloc.endswith(":80"):
-            netloc = netloc[:-3]
+            netloc = netloc.rsplit(":", 1)[0]
         elif parsed.scheme == "https" and netloc.endswith(":443"):
-            netloc = netloc[:-4]
+            netloc = netloc.rsplit(":", 1)[0]
 
         # Filter out boring extensions
         path_lower = parsed.path.lower()
@@ -796,7 +796,7 @@ def fingerprintWaf(responseHeaders=None, responseBody=None, statusCode=None):
                 # Also check header values for short tokens (e.g., "cf-ray")
                 if confidence == 0.0:
                     for key, val in header_dict.items():
-                        if pattern_lower in val or pattern_lower in ("%s=%s" % (key, val)):
+                        if pattern_lower in val or pattern_lower in ("%s: %s" % (key, val)):
                             confidence += 0.5
                             break
 
@@ -813,8 +813,8 @@ def fingerprintWaf(responseHeaders=None, responseBody=None, statusCode=None):
 
         # Apply base confidence if any match found
         if confidence > 0:
-            # Scale by the WAF's base confidence
-            confidence = min(confidence * fingerprint.get("confidence", 0.8), 1.0)
+            # Take the lesser of accumulated vs base confidence to avoid double-application
+            confidence = min(confidence, fingerprint.get("confidence", 0.8))
             detected_wafs[waf_name] = round(confidence, 2)
 
     return detected_wafs
@@ -1085,7 +1085,7 @@ def autoWafHandler():
             conf.delay = delay_sec
             infoMsg = "[AUTO] Set request delay to %.1fs (WAF rate-limit avoidance)" % delay_sec
             logger.info(infoMsg)
-    elif conf.delay is None or conf.delay < 1:
+    elif conf.delay is None:
         conf.delay = 1
         infoMsg = "[AUTO] Set request delay to 1 second (WAF rate-limit avoidance)"
         logger.info(infoMsg)
@@ -1236,8 +1236,8 @@ def autoEscalate():
     dataToStdout("\033[01;31m[AUTO]\033[0m \033[01;33mEscalating to stage %d: %s\033[0m\n" % (next_stage + 1, ",".join(next_tampers)))
 
     # Reset tamper and apply new chain
-    conf.tamper = ",".join(next_tampers)
     _applyTampers(next_tampers)
+    conf.tamper = ",".join(next_tampers)
 
     # Also try increasing level and risk
     if conf.level < 5:
